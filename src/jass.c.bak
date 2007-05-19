@@ -1,0 +1,949 @@
+/* vim: set sts=4 sw=4 et: */
+/**
+ * jass - just another sudoku solver
+ * (C) 2005-2006 Jari Tenhunen <jait@iki.fi>
+ *
+ * TODO:
+ * - naked triples/quads, hidden triples/quads
+ * - box-line reduction?
+ * - X-Wing?
+ * - use a bit vector for storing possibles?
+ *
+ */
+
+#include <stdlib.h>
+#include <inttypes.h>
+#include <stdio.h>
+#include <ctype.h>
+#include <string.h>
+#include <unistd.h>
+#include <errno.h>
+
+#include "jass.h"
+#include "poss.h"
+#include "log.h"
+
+static num_t board[Y][X];
+static char mode = MODE_NORMAL;
+
+static int scan_singles(void);
+static int scan_singles_rowcol(void);
+static int scan_boxes(void);
+
+static void find_possible_cells(struct point cells[], int n_cells, struct ptr_array poss_cells[]);
+static int scan_hidden_pairs_group(struct point cells[], int n_cells);
+static int scan_naked_pairs_group(struct point cells[], int n_cells);
+int scan_all_groups(group_scan_func scan, const char *name);
+
+void init(void)
+{
+    num_t i, j, k;
+    for (i = 0; i < Y; i++) 
+    {
+        for (j = 0; j < X; j++) 
+        {
+            for (k = 0; k < NR_MAX; ++k) 
+            {
+                set_poss(i, j, k, P_TRUE);
+            }
+            board[i][j] = 0;
+        }
+    }
+}
+
+void print_board(void)
+{
+    num_t i, j;
+
+    for (i = 0; i < X; i++) 
+    {
+        if (i % BOX_Y == 0)
+            printf("+-------+-------+-------+\n");
+
+        for (j = 0; j < Y; j++) 
+        {
+            if (j % BOX_X == 0)
+                printf("| ");
+
+            if (board[i][j] != 0)
+                printf("%d ", board[i][j]);
+            else
+                printf(". ");
+                
+        }
+        printf("|\n");
+    }
+    printf("+-------+-------+-------+\n");
+
+}
+
+void fix(num_t y, num_t x, num_t val)
+{
+    num_t i, j, k;
+
+    explain("Placing %d into (%d, %d)", val, x+1, y+1);
+    if (board[y][x] != 0) 
+    {
+        eprintf("Error: cell (%d,%d) already contains value %d", x+1, y+1, board[y][x]);
+    }
+
+    board[y][x] = val;
+
+    /* no other possibilities for this cell */
+    for (k = 0; k < NR_MAX; k++) 
+    {
+        set_poss(y, x, k, P_FALSE);
+    }
+
+    /* eliminate all occurrences of val from this col */
+    for (i = 0; i < Y; i++) 
+    {
+        /*
+        explain("Eliminating %d from (%d, %d)", val, x+1, i+1);
+        */
+        set_poss(i, x, val - 1, P_FALSE);
+    }
+    /* and row */
+    for (i = 0; i < X; i++) 
+    {
+        /*
+        explain("Eliminating %d from (%d, %d)", val, i+1, y+1);
+        */
+        set_poss(y, i, val - 1, P_FALSE);
+    }
+
+    /* eliminate all occurrences of val from current box */
+    y = (y / BOX_X) * BOX_X;
+    x = (x / BOX_Y) * BOX_Y;
+
+    for (i = y; i < y + BOX_X; i++) 
+    {
+        for (j = x; j < x + BOX_Y; j++) 
+        {
+            /*
+            explain("Eliminating %d from (%d, %d)", val, j+1, i+1);
+            */
+            set_poss(i, j, val - 1, P_FALSE);
+        }
+    }
+
+    if (mode == MODE_STEP)
+    {
+        getchar();
+    }
+}
+
+void init_fix(void) 
+{
+    num_t i, j, val;
+    for (i = 0; i < X; i++) 
+    {
+        for (j = 0; j < Y; j++) 
+        {
+            if (board[i][j] != 0) 
+            {
+                val = board[i][j];
+                board[i][j] = 0; /* to avoid warning */
+                fix(i, j, val); 
+            }
+        }
+    }
+}
+
+static int scan_singles(void)
+{
+    char found = 0;
+    num_t i, j, k, val;
+
+    for (i = 0; i < Y; i++) 
+    {
+        for (j = 0; j < X; j++) 
+        {
+            val = 0;
+            for (k = 0; k < NR_MAX; k++) 
+            {
+                if (is_poss(i,j,k)) 
+                {
+                    if (val != 0) 
+                    {
+                        /* at least two possibilities */
+                        val = 0;
+                        break;
+                    }
+
+                    val = k + 1; /* because val is 1... and index k is 0... */
+                }
+            }
+
+            if (val != 0) 
+            {
+                explain("Single possibility (%d) for cell (%d, %d)", val, j+1, i+1);
+                fix(i, j, val);
+                ++found;
+            }
+        }
+    }
+    return found;
+}
+
+static int scan_singles_rowcol(void)
+{
+    num_t i, j, k;
+    int place[NR_MAX];	/* holds the column or row of the only possible place for numbers */
+                        /* 0  => no possibilities (yet)  */
+                        /* -1 => two or more possibilities */
+    char found = 0;
+
+    /* loop rows */
+    for (i = 0; i < Y; i++) 
+    {
+        for (k = 0; k < NR_MAX; k++)
+            place[k] = 0;
+
+        for (j = 0; j < X; j++) 
+        {
+            /* don't check possibilities if the cell is occupied */
+            if (board[i][j] != 0)
+                continue;
+
+            for (k = 0; k < NR_MAX; k++) 
+            {
+                if (is_poss(i,j,k)) 
+                {
+                    if (place[k] == 0)  /* no possibility yet */
+                        place[k] = j + 1; /* because zero has a special meaning */
+                    else 
+                        place[k] = -1; /* two or more possible places for k */
+                }
+            }
+                
+        }
+        /* check after each row */
+        for (k = 0; k < NR_MAX; k++) 
+        {
+            if (place[k] > 0 ) 
+            {
+                explain("Single possible place (col %d) for %d on row %d", place[k]-1+1, k+1, i+1);
+                /* 1) because place-array has special meaning for zero
+                 * 2) because k is zero-offset */
+                fix(i, place[k]-1, k + 1); 
+                ++found;
+            }
+        }
+    }
+
+    /* loop cols */
+    for (j = 0; j < X; j++) 
+    {
+        for (k = 0; k < NR_MAX; k++)
+            place[k] = 0;
+
+        for (i = 0; i < Y; i++) 
+        {
+            /* don't check possibilities if the cell is occupied */
+            if (board[i][j] != 0)
+                continue;
+
+            for (k = 0; k < NR_MAX; k++) 
+            {
+                if (is_poss(i,j,k)) 
+                {
+                    if (place[k] == 0)  /* no possibility yet */
+                        place[k] = i + 1; /* because zero has a special meaning */
+                    else 
+                        place[k] = -1; /* two or more possible places for k */
+                }
+            }
+        }
+        /* check for singles after each row */
+        for (k = 0; k < NR_MAX; k++) 
+        {
+            if (place[k] > 0 ) 
+            {
+                explain("Single possible place (row %d) for %d on col %d\n", place[k]-1+1, k+1, j+1);
+                /* 1) because place-array has special meaning for zero
+                 * 2) because k is zero-offset */
+                fix(place[k]-1, j, k + 1); 
+                ++found;
+            }
+        }
+    }
+    return found;
+}
+
+static int scan_boxes(void)
+{
+    num_t i, j, k, bi, bj, tmpx, tmpy;
+    int found = 0;
+    int boxes_x;
+    int boxes_y;
+    struct point place[NR_MAX];	/* holds the place (y,x) of the only possible place for numbers */
+                                /* 0,0  => no possibilities (yet)  */
+                                /* -1   => two or more possibilities */
+
+    /* loop over 3x3 boxes */
+    /* loop over each number, checking if it has only one possible place */
+
+    boxes_y = Y / BOX_Y;
+    boxes_x = X / BOX_X;
+
+    for (bi = 0; bi < boxes_y; bi++) 
+    {
+        for (bj = 0; bj < boxes_x; bj++) 
+        {
+            /* clear place array */
+            for (k = 0; k < NR_MAX; k++) 
+            {
+                place[k].y = 0;
+                place[k].x = 0;
+            }
+            /* debug("Scanning box (%d, %d)", bj+1, bi+1); */
+            /* loop over the nine cells */
+            for (i = 0; i < BOX_Y; i++) 
+            {
+                tmpy = bi*BOX_Y + i;
+                for (j = 0; j < BOX_X; j++) 
+                {
+                    /* tricky */
+                    tmpx = bj*BOX_X + j;
+                    /* don't check possibilities if the cell is occupied */
+                    if (board[tmpy][tmpx] != 0)
+                        continue;
+
+                    for (k = 0; k < NR_MAX; k++) 
+                    {
+                        if (is_poss(tmpy,tmpx,k)) 
+                        {
+                            /* debug("%d poss in (%d, %d)", k+1, j+1, i+1); */
+                            if (place[k].x == 0) 
+                            {  
+                                /* no possibility yet */
+                                place[k].y = 1 + tmpy; /* because zero has a special meaning */
+                                place[k].x = 1 + tmpx;
+                            }
+                            else 
+                            {
+                                /* two or more possible places for k */
+
+                                /* if the possibilities are not in the same col, 
+                                 * mark as -1 */
+                                if (place[k].x != 1 + tmpx)
+                                    place[k].x = -1;
+
+                                /* not same row => mark as - 1 */
+                                if (place[k].y != 1 + tmpy)
+                                    place[k].y = -1;
+                            }
+                        }
+                    }
+                }
+            }
+            /* check after each box */
+            for (k = 0; k < NR_MAX; k++) 
+            {
+                if (place[k].x > 0 && place[k].y > 0) 
+                {
+                    explain("Single possible place (%d, %d) for %d in box (%d, %d)", place[k].x, place[k].y, k+1, bj+1, bi+1);
+                    /* 1) because place-array has special meaning for zero
+                     * 2) because k is zero-offset */
+                    fix(place[k].y - 1, place[k].x - 1, k + 1); 
+                    ++found;
+                }
+                else if (place[k].x > 0) 
+                {
+                    /* k possible only on this col */
+                    /* eliminate k's other possibilities from other boxes on current col */
+                    for (tmpy = 0; tmpy < boxes_y; tmpy++) 
+                    {
+                        if (tmpy == bi) /* don't delete possibilities from current box */
+                            continue;
+
+                        for (i = 0; i < BOX_Y; i++) 
+                        {
+                            if (is_poss(tmpy * BOX_Y + i,(place[k].x - 1),k)) 
+                            {
+                                /* explain("%d possible only on col %d in box (%d, %d)", k+1, place[k].x, bj+1, bi+1); */
+                                debug("Eliminating %d from (%d, %d)", k+1, place[k].x, tmpy * BOX_Y + i + 1);
+                                set_poss(tmpy * BOX_Y + i,(place[k].x - 1),k, P_FALSE);
+                                ++found;
+                            }
+                        }
+                    }
+
+                }
+                else if (place[k].y > 0) 
+                {
+                    /* k possible only on this row */
+                    /* eliminate k's other possibilities from other boxes on current row */
+                    for (tmpx = 0; tmpx < boxes_x; tmpx++) 
+                    {
+                        if (tmpx == bj) /* don't delete possibilities from current box */
+                            continue;
+
+                        for (j = 0; j < BOX_X; j++) 
+                        {
+                            if (is_poss(place[k].y - 1, tmpx * BOX_X + j, k)) 
+                            {
+                                /* explain("%d possible only on row %d in box (%d, %d)", k+1, place[k].y, bj+1, bi+1); */
+                                debug("Eliminating %d from (%d, %d)\n", k+1, tmpx * BOX_X + j + 1, place[k].y);
+                                set_poss(place[k].y-1, tmpx * BOX_X + j, k, P_FALSE);
+                                ++found;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return found;
+}
+
+int scan_naked_pairs_group(struct point cells[], int n_cells)
+{
+    num_t k;
+    int found = 0;
+    num_t subset[2];
+    num_t subset_comp[2];
+    struct point place;
+    struct point place_comp;	/* holds the places (x,y) of the pair */
+    int cellno, cellno2, cellno3;
+    struct point *cell = NULL;
+    struct point *cell2 = NULL;
+    struct point *cell3 = NULL;
+
+    if (NULL == cells || n_cells < 1)
+        return 0;
+
+    /* walk through all given cells */
+    for (cellno = 0; cellno < n_cells - 1; ++cellno)
+    {
+        cell = & (cells[cellno]);
+
+        if (board[cell->y][cell->x] != 0)
+            continue;
+
+        /* clear things */
+        subset[0] = 0;
+        subset[1] = 0;
+
+        /* check # of candidates for this cell */
+        for (k = 0; k < NR_MAX; ++k) 
+        {
+            if (is_poss(cell->y, cell->x,k)) 
+            {
+                if (subset[0] == 0) 
+                {
+                    subset[0] = k + 1;
+                }
+                else if (subset[1] == 0) 
+                {
+                    subset[1] = k + 1;
+                    place.y = cell->y;
+                    place.x = cell->x; 
+                }
+                else 
+                {
+                    subset[0] = 0;
+                    subset[1] = 0;
+                    break;
+                }
+            }
+        }
+
+        /* if the cell has only two candidates */
+        if (subset[0] != 0 && subset[1] != 0) 
+        {
+            subset_comp[0] = 0;
+            subset_comp[1] = 0;
+            place_comp.y = 0;
+            place_comp.x = 0;
+
+            for (cellno2 = cellno + 1; cellno2 < n_cells; ++cellno2)
+            {
+                cell2 = & (cells[cellno2]);
+
+                if (board[cell2->y][cell2->x] != 0)
+                    continue;
+
+                /* clear things */
+                subset_comp[0] = 0;
+                subset_comp[1] = 0;
+                place_comp.x = cell2->x;
+
+                if (poss_equals(place.y, place.x, cell2->y, cell2->x)) 
+                {
+                    subset_comp[0] = subset[0];
+                    subset_comp[1] = subset[1];
+                    place_comp.x = cell2->x;
+                    place_comp.y = cell2->y;
+                    break;
+                    /* TODO: this ignores naked triples */
+                }
+            }
+
+            if (subset_comp[0] != 0 && subset_comp[1] != 0) 
+            {
+                /* eliminate candidates from other cells in the group */
+                for (cellno3 = 0; cellno3 < n_cells; ++cellno3)
+                {
+                    cell3 = & (cells[cellno3]);
+                    if (cell3 == cell || cell3 == cell2)
+                        continue;
+
+                    if (set_poss(cell3->y, cell3->x, subset[0]-1, P_FALSE)) 
+                    {
+
+                        explain("Naked pair {%d, %d} found in cells (%d, %d) and (%d, %d)",subset[0], subset[1], place.x+1, place.y+1, place_comp.x+1,place_comp.y+1);
+                        debug("Eliminating %d from (%d, %d)\n", subset[0], cell3->x+1, cell3->y+1);
+                        ++found;
+                    }
+                    if (set_poss(cell3->y, cell3->x, subset[1]-1, P_FALSE)) 
+                    {
+                        explain("Naked pair {%d, %d} found in cells (%d, %d) and (%d, %d)", subset[0], subset[1], place.x+1, place.y+1, place_comp.x+1,place_comp.y+1);
+                        debug("Eliminating %d from (%d, %d)", subset[1], cell3->x+1, cell3-cell3->y+1);
+                        ++found;
+                    }
+                }
+            }
+        }
+    }
+
+    return found;
+}
+
+void find_possible_cells(struct point cells[], int n_cells, struct ptr_array poss_cells[])
+{
+    int cellno, nr;
+    struct point **tmp = NULL;
+    struct point *cell = NULL;
+
+    /* walk through all given cells to find possible cells for all numbers */
+    for (cellno = 0; cellno < n_cells; ++cellno)
+    {
+        cell = & (cells[cellno]);
+        
+        for (nr = 0; nr < NR_MAX; ++nr)
+        {
+            /* don't check possibilities if the cell is occupied */
+
+            if (board[cell->y][cell->x] == 0 && is_poss(cell->y, cell->x, nr))
+            {
+                /* uh, hope i got this right this time ! */
+                /* TODO: this whole pointer arithmetic is so error-prone that
+                 * some other data structure would be better */
+                tmp = (struct point **) (poss_cells[nr].ptr + (poss_cells[nr].n));
+                *tmp = cell;
+                (poss_cells[nr].n)++;
+            }
+        }
+    }
+}
+
+int scan_all_groups(group_scan_func scan, const char *name)
+{
+    int found = 0, boxes_x, boxes_y, tmpy, tmpx;
+    num_t i, j, bj, bi, n;
+    struct point cells[NR_MAX];
+
+    /* rows */
+    for (j = 0; j < Y; ++j)
+    {
+        for (i = 0; i < X; ++i)
+        {
+            cells[i].y = j;
+            cells[i].x = i;
+        }
+        debug("Performing scan `%s' on row %d", name, j + 1);
+        if (scan(cells, NR_MAX))
+            ++found;
+    }
+
+    /* cols */
+    for (i = 0; i < X; ++i)
+    {
+        for (j = 0; j < Y; ++j)
+        {
+            cells[j].y = j;
+            cells[j].x = i;
+        }
+        debug("Performing scan `%s' on col %d", name, i + 1);
+        if (scan(cells, NR_MAX))
+            ++found;
+    }
+
+    /* and boxes */
+    boxes_y = Y / BOX_Y;
+    boxes_x = X / BOX_X;
+
+    for (bj = 0; bj < boxes_y; bj++) 
+    {
+        for (bi = 0; bi < boxes_x; bi++) 
+        {
+            /* debug("Scanning box (%d, %d)", bi+1, bj+1); */
+            /* loop over the nine cells */
+            n = 0;
+            for (j = 0; j < BOX_Y; j++) 
+            {
+                tmpy = bj*BOX_Y + j;
+                for (i = 0; i < BOX_X; i++) 
+                {
+                    tmpx = bi*BOX_X + i;
+                    cells[n].y = tmpy;
+                    cells[n].x = tmpx;
+                    n++;
+                }
+            }
+            if (scan(cells, NR_MAX))
+                ++found;
+        }
+    }
+
+    return found;
+}
+
+int scan_hidden_pairs_group(struct point cells[], int n_cells)
+{
+    int found = 0;
+    struct point *cell = cells;
+    void * voidptr = NULL;
+    num_t nr = 0, first = 0, second = 0, nr2, i;
+    struct ptr_array poss_cells[NR_MAX];
+
+    if (NULL == cells || n_cells < 1)
+        return 0;
+
+    /* initialize the poss_cells array */
+    for (nr = 0; nr < NR_MAX; ++nr)
+    {
+        /* poss_cells[nr].ptr = calloc(n_cells, sizeof(struct point *)); */
+        voidptr = calloc(n_cells, sizeof(struct point *));
+        /* debug("poss_cells[%d].ptr %p", nr, voidptr); */
+        poss_cells[nr].ptr = voidptr;
+        if (NULL == poss_cells[nr].ptr)
+            eprintf("calloc() failed:");
+
+        poss_cells[nr].n = 0; /* n means in this context the number of possible cells */
+    }
+
+    /* must find exactly two cells that contain the same two candidates.
+     * The candidates must not appear anywhere else in the group.
+     */
+
+    /*
+     * - create a mapping for all numbers:
+     *   number => possible cells
+     */
+    find_possible_cells(cells, n_cells, poss_cells);
+
+    /*
+     * - if number has exactly two possible cells, store as candidate and go on
+     * - if another number has exactly two possible cells and the cells are the same
+     *   => hidden pair. eliminate all other candidates (if there are any) in these two cells
+     *
+     */
+
+    for (nr = 0; nr < NR_MAX - 1; ++nr)
+    {
+        if (poss_cells[nr].n == 2)
+        {
+            first = nr + 1;
+            /* search if there's another number having the same possible cells */
+            for (nr2 = nr + 1; nr2 < NR_MAX; ++nr2)
+            {
+                if (poss_cells[nr2].n == 2)
+                {
+                    int same = 1;
+                    int slot;
+
+                    second = nr2 + 1;
+                    /* the cells are traversed in the same order */
+                    for (slot = 0; slot < 2; slot++)
+                    {
+                        /* compare if the possible cells point to the same place */
+                        if ((struct point *) *(poss_cells[nr].ptr + slot) !=
+                                (struct point *) *(poss_cells[nr2].ptr + slot))
+                        {
+                            same = 0;
+                            break;
+                        }
+                    }
+                    if (same)
+                    {
+                        debug("Hidden pair {%d, %d} found", first, second);
+                        for (slot = 0; slot < 2; slot++)
+                        {
+                            cell = (struct point *) *(poss_cells[nr].ptr + slot);
+                            /* eliminate all other possibilities except the pair */
+                            for (i = 0; i < NR_MAX; ++i)
+                            {
+                                if (i + 1 == first || i + 1 == second)
+                                {
+                                    continue;
+                                }
+
+                                if (set_poss(cell->y, cell->x, i, P_FALSE))
+                                {
+                                    explain("Eliminating %d from (%d, %d)", i+1, cell->x+1, cell->y+1);
+                                    ++found;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /* free the allocated stuff */
+    for (nr = 0; nr < NR_MAX; ++nr)
+    {
+        /*debug("freeing mem at %p", poss_cells[nr].ptr); */
+        free(poss_cells[nr].ptr);
+    }
+
+    return found;
+}
+
+/**
+ * Returns number of unsolved cells 
+ * 
+ */
+int check_unsolved(void)
+{
+    num_t i, j;
+    int unsolved = 0;
+
+    for (i = 0; i < X; i++) 
+    {
+        for (j = 0; j < Y; j++) 
+        {
+            if (board[i][j] == 0)
+                ++unsolved;
+        }
+    }
+    return unsolved;
+}
+
+/**
+ *
+ *
+ */
+int parse_board(const char *str)
+{
+    int i = 0;
+    char c = 0;
+    num_t *bptr = (num_t *) board;
+
+    while ((c = str[i]) != '\0' && i < X*Y) 
+    {
+        if (c == '0' || c == '.')
+            bptr[i] = 0;
+        else if (isdigit(c)) /* or isxdigit() ? */
+        {  
+            fix((i / X), i % X, c - '0'); 
+            /* bptr[i] = c - '0'; */
+        }
+        else 
+            return -1;
+
+        ++i;
+    }
+    return i;
+}
+
+void dump_board(FILE *out) 
+{
+    num_t i, j;
+
+    for (i = 0; i < Y; i++) 
+    {
+        for (j = 0; j < X; j++) 
+        {
+            if (board[i][j] == 0)
+                fprintf(out, ".");
+            else 
+                fprintf(out, "%d", board[i][j]);
+        }
+    }
+    fprintf(out, "\n");
+}
+
+int main(int argc, char **argv)
+{
+    extern char *optarg;
+    extern int optind, optopt;
+    char *fname = NULL;
+    char step = 0;
+    int c;
+    init();
+
+    /* check args
+     * -f: read sudokus from file (- for stdin)
+     */
+    while ((c = getopt(argc, argv, "f:vsh")) != EOF) 
+    {
+        switch (c) 
+        {
+            case 'f':
+                fname = (char *) malloc(strlen(optarg)+1);
+                if (fname == NULL)
+                    eprintf("malloc() failed:");
+
+                strncpy(fname, optarg, strlen(optarg));
+                fname[strlen(optarg)] = '\0';
+                break;
+            case 'v':
+                set_loglevel(get_loglevel() + 1);
+                break;
+            case 'h':
+                usage();
+                exit(EXIT_SUCCESS);
+            case 's':
+                step = 1;
+                break;
+            default:
+                break;
+        }
+    }
+
+    /*
+    if (step && verbose == 0)
+        ++verbose;
+    */
+
+    if (fname != NULL) 
+    {
+        FILE *file;
+        char *line;
+        int bufsize = X*Y + 2;
+        if (strcmp(fname, "-") == 0)
+            file = stdin;
+        else 
+        {
+            file = fopen(fname, "r");
+            if (file == NULL)
+                eprintf("Couldn't open file '%s':", fname);
+
+        }
+        line = (char *) malloc(bufsize);
+        if (NULL == line)
+            eprintf("malloc() failed:");
+
+        while (fgets(line, bufsize, file) != NULL) 
+        {
+            if (line[0] == '#')
+                continue;
+
+            init();
+            parse_board(line);
+            mode = MODE_NORMAL;
+            if (step)
+                mode = MODE_STEP;
+
+            printf(line);
+            solve();
+        }
+        if (fileno(file) != STDIN_FILENO)
+            fclose(file);
+
+        free(line);
+        free(fname);
+    }
+    else 
+    {
+        /* try if there was a puzzle as argument */
+        if (argc > optind) 
+        {
+            printf("Initializing the board ...\n");
+            if (parse_board(argv[optind]) != X*Y) 
+            {
+                eprintf("Error parsing the puzzle");
+            }
+            print_board();
+            mode = MODE_NORMAL;
+            if (step)
+                mode = MODE_STEP;
+
+            solve();
+        }
+        else 
+        {
+            wprintf("Error: no puzzle(s) given");
+            usage();
+            exit(EXIT_FAILURE);
+        }
+    }
+
+    exit(EXIT_SUCCESS);
+}
+
+void usage(void)
+{
+    printf("Usage: jass [options] [<puzzle>]\n");
+    printf("  -f <file>        instead looking for the puzzle string in the arguments,\n");
+    printf("                   read puzzles from file (\"-\" for stdin), one per line\n");
+    printf("  -s               step mode, pause after each solved number\n");
+    printf("  -v               verbose debug output\n");
+    printf("  -h               print usage and exit\n");
+}
+
+/**
+ * Tries to solve the puzzle
+ *
+ * Returns true if the puzzle was fully solved
+ */
+int solve(void) 
+{
+    int nr = 1;
+    /* loop as long as there is some progress */
+    while (nr) 
+    {
+        nr = 0;
+
+        debug("Scanning for singles...");
+        if ((nr = scan_singles())) 
+        {
+            /* print_board(); */
+            continue;
+        }
+        debug("Scanning boxes for singles and pointing pairs/triples...");
+        if ((nr = scan_boxes())) 
+        {
+            /* print_board(); */
+            continue;
+        }
+        debug("Scanning for singles on rows and cols...");
+        if ((nr = scan_singles_rowcol())) 
+        {
+            /* print_board(); */
+            continue;
+        }
+        debug("Scanning for naked pairs...");
+        if ((nr = scan_all_groups(&scan_naked_pairs_group, "naked pairs"))) 
+        {
+            /* print_board(); */
+            continue;
+        }
+        debug("Scanning for hidden pairs...");
+        if ((nr = scan_all_groups(&scan_hidden_pairs_group, "hidden pairs"))) 
+        {
+            /*print_board(); */
+            continue;
+        }
+    }
+
+    print_board();
+    if ((nr = check_unsolved()) == 0)
+        info("Sudoku solved!");
+    else
+        info("Sudoku not solved, %d numbers left =(", nr);
+
+    dump_board(stdout);
+
+    return (nr == 0);
+}
+
+int get_mode(void)
+{
+    return mode;
+}

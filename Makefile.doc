@@ -1,0 +1,5 @@
+.PHONY: doc
+doc: README
+
+README: README.html
+	$(LYNX) -dump $< > $@

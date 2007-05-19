@@ -1,0 +1,39 @@
+                       jass - just another sudoku solver
+
+What?
+
+     * tries to solve 9x9 sudokus that don't require guessing and have a
+       unique solution
+     * should be able to solve most sudokus from newspapers
+
+How?
+
+     * uses logic only (no brute-force)
+     * the following reduction techniques are implemented:
+
+          * scans for singles
+          * (hidden) singles in boxes, rows and cols
+          * pointing pairs and triples (a.k.a. intersection removal)
+          * box / line reduction (a.k.a. intersection removal)
+          * naked pairs
+	  * hidden pairs
+
+Why?
+
+     * just for fun
+     * to see if I could create my own sudoku solver from scratch
+
+Who?
+
+     * Jari Tenhunen <jari.tenhunen@iki.fi>
+
+TODO
+
+     * more reduction techniques:
+
+          * naked triples/quads
+          * hidden triples/quads
+	  * block / block interaction
+	  * X-Wing
+
+     * use a bit vector for storing candidates/possibles?
