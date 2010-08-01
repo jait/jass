@@ -16,7 +16,7 @@ How?
           * pointing pairs and triples (a.k.a. intersection removal)
           * box / line reduction (a.k.a. intersection removal)
           * naked pairs
-	  * hidden pairs
+          * hidden pairs
 
 Why?
 
@@ -33,7 +33,7 @@ TODO
 
           * naked triples/quads
           * hidden triples/quads
-	  * block / block interaction
-	  * X-Wing
+          * block / block interaction
+          * X-Wing
 
      * use a bit vector for storing candidates/possibles?
