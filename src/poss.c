@@ -10,7 +10,7 @@
 
 static num_t poss[Y][X][NR_MAX];
 
-inline char is_poss(num_t y, num_t x, num_t candidate)
+char is_poss(num_t y, num_t x, num_t candidate)
 {
     return poss[y][x][candidate];
     /* return (poss[y][x] & (1 << candidate)); */
@@ -20,7 +20,7 @@ inline char is_poss(num_t y, num_t x, num_t candidate)
  * Sets candidate to be possible or not possible for cell (x,y)
  *
  */
-inline char set_poss(num_t y, num_t x, num_t candidate, char val)
+char set_poss(num_t y, num_t x, num_t candidate, char val)
 {
     char prev = poss[y][x][candidate];
     poss[y][x][candidate] = val;
@@ -67,7 +67,7 @@ int poss_get_pair(coord_t y, coord_t x, num_t *a, num_t *b)
     return 0;
 }
 
-inline int poss_equals(coord_t y1, coord_t x1, coord_t y2, coord_t x2)
+int poss_equals(coord_t y1, coord_t x1, coord_t y2, coord_t x2)
 {
     return (memcmp(poss[y1][x1], poss[y2][x2], NR_MAX) == 0);
 }
@@ -75,12 +75,12 @@ inline int poss_equals(coord_t y1, coord_t x1, coord_t y2, coord_t x2)
 /**
  * Bit-vector versions
  */
-inline poss_t get_poss(coord_t y, coord_t x)
+poss_t get_poss(coord_t y, coord_t x)
 {
     return 0;
 }
 
-inline int poss_contains_set(coord_t y, coord_t x, poss_t set)
+int poss_contains_set(coord_t y, coord_t x, poss_t set)
 {
     return ((0 & set) == set);
 }

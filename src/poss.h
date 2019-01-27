@@ -12,15 +12,16 @@
 
 typedef uint16_t poss_t;
 
-inline char is_poss(num_t y, num_t x, num_t val);
-inline char set_poss(num_t y, num_t x, num_t candidate, char val);
+char is_poss(num_t y, num_t x, num_t val);
 
-inline poss_t get_poss(coord_t y, coord_t x);
+char set_poss(num_t y, num_t x, num_t candidate, char val);
 
-inline int poss_contains_set(coord_t y, coord_t x, poss_t set);
+poss_t get_poss(coord_t y, coord_t x);
+
+int poss_contains_set(coord_t y, coord_t x, poss_t set);
 
 num_t get_only_poss(coord_t y, coord_t x);
 
-inline int poss_equals(coord_t y1, coord_t x1, coord_t y2, coord_t x2);
+int poss_equals(coord_t y1, coord_t x1, coord_t y2, coord_t x2);
 
 #endif

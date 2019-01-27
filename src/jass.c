@@ -275,7 +275,7 @@ int main(int argc, char **argv)
             if (step)
                 mode = MODE_STEP;
 
-            printf(line);
+            printf("%s", line);
             solve();
         }
         if (fileno(file) != STDIN_FILENO)
