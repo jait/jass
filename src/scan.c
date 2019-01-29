@@ -640,7 +640,7 @@ scan_box_line_group(struct point cells[], int n_cells)
      */
     find_possible_cells(cells, n_cells, poss_cells);
 
-    for (nr = 0; nr < NR_MAX - 1; ++nr)
+    for (nr = 0; nr < NR_MAX; ++nr)
     {
         if (poss_cells[nr].n > BOX_X)
             continue;
